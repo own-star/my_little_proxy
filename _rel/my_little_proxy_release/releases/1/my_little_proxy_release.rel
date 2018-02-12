@@ -1,7 +1,0 @@
-{release,{"my_little_proxy_release","1"},
-         {erts,"9.0.4"},
-         [{kernel,"5.3.1"},
-          {stdlib,"3.4.1"},
-          {my_little_proxy,"0.1.0"},
-          {sasl,"3.0.4"},
-          {runtime_tools,"1.12.1"}]}. 

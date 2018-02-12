@@ -1,7 +1,0 @@
-[{release,"my_little_proxy_release","1","9.0.4",
-          [{kernel,"5.3.1","./lib/kernel-5.3.1"},
-           {stdlib,"3.4.1","./lib/stdlib-3.4.1"},
-           {my_little_proxy,"0.1.0","./lib/my_little_proxy-0.1.0"},
-           {sasl,"3.0.4","./lib/sasl-3.0.4"},
-           {runtime_tools,"1.12.1","./lib/runtime_tools-1.12.1"}],
-          permanent}].
