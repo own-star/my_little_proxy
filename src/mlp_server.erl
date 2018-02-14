@@ -13,7 +13,7 @@
 		code_change/3
 	]).
 
--record(state, {ilsock, olsock, socket, request_line, headers = [],
+-record(state, {lsock, osock, socket, request_line, headers = [],
 		host, user_data, parent}).
 
 
@@ -26,7 +26,7 @@ start_link(LSock, UserArgs) ->
 
 init([LSock, UserArgs, Parent]) ->
 	io:format("Start new link: ~p, with parent: ~p~n", [self(), Parent]),
-	State = #state{ilsock = LSock, user_data = UserArgs, parent = Parent},
+	State = #state{lsock = LSock, user_data = UserArgs, parent = Parent},
 	{ok, State, 0}.
 
 handle_call(_Request, _From, State) ->
@@ -38,20 +38,43 @@ handle_cast(_Request, State) ->
 handle_info({http, Sock, {http_request, Method, Url, _}=Request}, State) ->
 	io:format("Socket: ~p Get HTTP Method: ~p URL: ~p~nRequest: ~p~n", [Sock, Method, Url, Request]),
 	inet:setopts(State#state.socket, [{active, once}]),
-	{noreply, State#state{request_line = Request}};
-handle_info({http, _Sock, {http_header, _, 'Host', _, Value}=Header}, State) ->
+	Req = handle_request(Request),
+	{noreply, State#state{request_line = Req}};
+handle_info({http, _Sock, {http_header, _, 'Host', _, Value}}, State) ->
 	inet:setopts(State#state.socket, [{active, once}]),
 	{Host, Port} = get_host(Value),
 	io:format("Host: ~p, Port: ~p~n", [Host, Port]),
-	io:format("Get HTTP Header: ~p:~p  Full: ~p~n", ['Host', Value, Header]),
-	{noreply, State#state{headers = [Header | State#state.headers], host = {Host, Port}}};
-handle_info({http, _Sock, {http_header, _, Name, _, Value}=Header}, State) ->
+	io:format("Get HTTP Header: ~p:~p~n", ['Host', Value]),
+	{noreply, State#state{headers = [{'Host', Value} | State#state.headers], host = {Host, Port}}};
+handle_info({http, _Sock, {http_header, _, Name, _, Value}}, State) ->
 	inet:setopts(State#state.socket, [{active, once}]),
-	io:format("Get HTTP Header: ~p:~p  Full: ~p~n", [Name, Value, Header]),
-	{noreply, State#state{headers = [Header | State#state.headers]}};
-handle_info({http, _Sock, http_eoh}, State) ->
+	io:format("Get HTTP Header: ~p:~p~n", [Name, Value]),
+	{noreply, State#state{headers = [{Name, Value} | State#state.headers]}};
+handle_info({http, _Sock, http_eoh}, #state{request_line = Request, host = {Host, Port}} = State) ->
 	io:format("End of Headers~n"),
-	{stop, normal, mlp_worker:start_link(State#state.socket, State#state.request_line, State#state.headers, State#state.host)};
+	inet:setopts(State#state.socket, [{active, true}, {packet, raw}]),
+	case gen_tcp:connect(Host, Port, [{active, true}, {packet, raw}]) of
+		{ok, Socket} ->
+			io:format("OutPutSocket: ~p, Request: ~p ~n", [Socket, Request]),
+			gen_tcp:send(Socket, Request),
+			gen_tcp:send(Socket, headers(State#state.headers)),
+			gen_tcp:send(Socket, io_lib:format("\r\n", [])),
+%			headers(State#state.headers),
+			{noreply, State#state{osock = Socket, request_line = undefined, headers = undefined}};
+		{error, Reason} ->
+			io:format("Reason: ~p~n", [Reason]),
+			{stop, normal, Reason}
+	end;	
+
+handle_info({tcp, OutSock, Data}, #state{osock = OutSock, socket = InSock} = State) ->
+	io:format("Data from ~p: ~p~n", [OutSock, Data]),
+	gen_tcp:send(InSock, Data),
+	{noreply, State};
+
+handle_info({tcp, InSock, Data}, #state{osock = OutSock, socket = InSock} = State) ->
+	io:format("Data from ~p: ~p~n", [InSock, Data]),
+	gen_tcp:send(OutSock, Data),
+	{noreply, State};
 
 handle_info({tcp, _Sock, Data}, State) ->
 	io:format("Data: ~p~n", [Data]),
@@ -60,7 +83,7 @@ handle_info({tcp, _Sock, Data}, State) ->
 handle_info({tcp_closed, _Sock}, State) ->
 	{stop, normal, State};
 
-handle_info(timeout, #state{ilsock = LSock, parent = Parent} = State) ->
+handle_info(timeout, #state{lsock = LSock, parent = Parent} = State) ->
 	{ok, Socket} = gen_tcp:accept(LSock),
 	io:format("New Socket: ~p~n", [Socket]),
 	mlp_server_sup:start_child(Parent),
@@ -121,3 +144,23 @@ get_ip([], Port, _, Acc) ->
 
 reverse_ip([Q1, Q2, Q3, Q4], Port) ->
 	{{Q1, Q2, Q3, Q4}, binary_to_integer(Port)}.
+
+handle_request({_, Method, {absoluteURI, _Prot, _Host, undefined, Path}, {V0,V1}}) ->
+	Req = io_lib:format("~s ~s HTTP/~w.~w\r\n", [Method, Path, V0, V1]),
+%	Req = io_lib:format("~s ~s://~s~s HTTP/~w.~w\r\n", [Method, Prot, Host, Path, V0, V1]),
+	io:format("Req: ~p~n", [Req]),
+	Req;
+handle_request({_, Method, {absoluteURI, _Prot, _Host, _Port, Path}, {V0,V1}}) ->
+	Req = io_lib:format("~s ~s HTTP/~w.~w\r\n", [Method, Path, V0, V1]),
+%	Req = io_lib:format("~s ~s://~s:~s~s HTTP/~w.~w\r\n", [Method, Prot, Host, Port, Path, V0, V1]),
+	io:format("Req: ~p~n", [Req]),
+	Req;
+handle_request({_, Method, {scheme, Host, Port}, {V0,V1}}) ->
+	Req = io_lib:format("~s ~s:~s HTTP/~w.~w\r\n\r\n", [Method, Host, Port, V0, V1]),
+	io:format("Req: ~p~n", [Req]),
+	Req.
+
+headers([{Header, Text} | Hs]) ->
+	[io_lib:format("~s: ~s\r\n", [Header, Text]) | headers(Hs)];
+headers([]) ->
+	[].
