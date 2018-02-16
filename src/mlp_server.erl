@@ -13,7 +13,7 @@
 		code_change/3
 	]).
 
--record(state, {lsock, osock, socket, request_line, headers = [],
+-record(state, {lsock, osock, socket, request_line, method, headers = [],
 		host, user_data, parent}).
 
 
@@ -39,7 +39,7 @@ handle_info({http, Sock, {http_request, Method, Url, _}=Request}, State) ->
 	io:format("Socket: ~p Get HTTP Method: ~p URL: ~p~nRequest: ~p~n", [Sock, Method, Url, Request]),
 	inet:setopts(State#state.socket, [{active, once}]),
 	Req = handle_request(Request),
-	{noreply, State#state{request_line = Req}};
+	{noreply, State#state{request_line = Req, method = Method}};
 handle_info({http, _Sock, {http_header, _, 'Host', _, Value}}, State) ->
 	inet:setopts(State#state.socket, [{active, once}]),
 	{Host, Port} = get_host(Value),
@@ -53,27 +53,47 @@ handle_info({http, _Sock, {http_header, _, Name, _, Value}}, State) ->
 handle_info({http, _Sock, http_eoh}, #state{request_line = Request, host = {Host, Port}} = State) ->
 	io:format("End of Headers~n"),
 	inet:setopts(State#state.socket, [{active, true}, {packet, raw}]),
-	case gen_tcp:connect(Host, Port, [{active, true}, {packet, raw}]) of
+	case gen_tcp:connect(Host, Port, [binary, {active, true}, {packet, raw}, {keepalive, true}, {reuseaddr, true}]) of
 		{ok, Socket} ->
 			io:format("OutPutSocket: ~p, Request: ~p ~n", [Socket, Request]),
-			gen_tcp:send(Socket, Request),
-			gen_tcp:send(Socket, headers(State#state.headers)),
-			gen_tcp:send(Socket, io_lib:format("\r\n", [])),
+			Headers = headers(State#state.headers),
+			case State#state.method of
+				<<"CONNECT">> ->
+%					Reply = io_lib:format("~s\r\n~s\r\nContent-Length: ~w\r\n\r\n", [
+%							<<"HTTP/1.0 200 Connection Established">>,
+%							<<"Proxy-agent: MLP-Proxy/0.1">>,0]),
+%					io:format("Connect: ~p~n", [Reply]),
+%					gen_tcp:send(State#state.socket, Reply);
+					gen_tcp:send(State#state.socket, <<"HTTP/1.0 200 Connection established",$\r,$\n,$\r,$\n>>);
+%					gen_tcp:send(State#state.socket, <<"HTTP/1.1 200 Connection Established",$\r,$\n,$\r,$\n>>);
+				_ -> 
+					gen_tcp:send(Socket, Request),
+					gen_tcp:send(Socket, Headers),
+					gen_tcp:send(Socket, <<$\r, $\n>>)
+			end,
 %			headers(State#state.headers),
 			{noreply, State#state{osock = Socket, request_line = undefined, headers = undefined}};
 		{error, Reason} ->
 			io:format("Reason: ~p~n", [Reason]),
 			{stop, normal, Reason}
 	end;	
+handle_info({http, InSock, {http_error, Data}}, #state{osock = OutSock, socket = InSock} = State) ->
+	io:format("Non HTTP fom browser: ~p~n", [Data]),
+	Res = gen_tcp:send(OutSock, Data),
+	inet:setopts(State#state.socket, [{active, once}]),
+	io:format("Res to site: ~p~n", [Res]),
+	{noreply, State};
 
 handle_info({tcp, OutSock, Data}, #state{osock = OutSock, socket = InSock} = State) ->
 	io:format("Data from ~p: ~p~n", [OutSock, Data]),
-	gen_tcp:send(InSock, Data),
+	Res = gen_tcp:send(InSock, Data),
+	io:format("Res to browser: ~p~n", [Res]),
 	{noreply, State};
 
 handle_info({tcp, InSock, Data}, #state{osock = OutSock, socket = InSock} = State) ->
 	io:format("Data from ~p: ~p~n", [InSock, Data]),
-	gen_tcp:send(OutSock, Data),
+	Res = gen_tcp:send(OutSock, Data),
+	io:format("Res to site: ~p~n", [Res]),
 	{noreply, State};
 
 handle_info({tcp, _Sock, Data}, State) ->
@@ -162,5 +182,7 @@ handle_request({_, Method, {scheme, Host, Port}, {V0,V1}}) ->
 
 headers([{Header, Text} | Hs]) ->
 	[io_lib:format("~s: ~s\r\n", [Header, Text]) | headers(Hs)];
+headers([undefined | Hs]) ->
+	headers(Hs);
 headers([]) ->
 	[].
